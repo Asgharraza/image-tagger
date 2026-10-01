@@ -4,17 +4,18 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
+const { tagImage } = require('./llm/client');
+const { TagOutput } = require('./llm/schema');
+const db = require('./db/database');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(express.json());
 
-// Ensure uploads folder exists
 const UPLOADS_DIR = path.join(__dirname, '..', 'uploads');
 fs.mkdirSync(UPLOADS_DIR, { recursive: true });
 
-// Multer config
 const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, UPLOADS_DIR),
   filename: (req, file, cb) => {
@@ -26,7 +27,7 @@ const storage = multer.diskStorage({
 
 const upload = multer({
   storage,
-  limits: { fileSize: 5 * 1024 * 1024 }, // 5 MB
+  limits: { fileSize: 5 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
     const allowed = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
     if (!allowed.includes(file.mimetype)) {
@@ -41,19 +42,63 @@ app.get('/health', (req, res) => {
 });
 
 // ─────────────────────────────────────────
-// POST /upload
+// POST /tag — upload + tag in one request
 // ─────────────────────────────────────────
-app.post('/upload', upload.single('image'), (req, res) => {
+app.post('/tag', upload.single('image'), async (req, res) => {
   if (!req.file) {
     return res.status(400).json({ error: 'No image uploaded' });
   }
 
-  res.status(201).json({
-    id: path.basename(req.file.filename, path.extname(req.file.filename)),
-    filename: req.file.filename,
-    size: req.file.size,
-    mime: req.file.mimetype
-  });
+  const filePath = req.file.path;
+  const mime = req.file.mimetype;
+
+  try {
+    const { raw } = await tagImage(filePath, mime);
+
+    // Clean + parse
+    const cleaned = raw.replace(/```json|```/g, '').trim();
+    let parsed;
+    try {
+      parsed = JSON.parse(cleaned);
+    } catch (e) {
+      return res.status(422).json({ error: 'Model returned non-JSON', raw });
+    }
+
+    // Validate schema
+    const validated = TagOutput.safeParse(parsed);
+    if (!validated.success) {
+      return res.status(422).json({
+        error: 'Schema mismatch',
+        detail: validated.error.issues[0].message,
+        raw
+      });
+    }
+
+    // Store
+    const stmt = db.prepare(`
+      INSERT INTO images (filename, tags, raw_response, created_at)
+      VALUES (?, ?, ?, ?)
+    `);
+    const result = stmt.run(
+      req.file.filename,
+      JSON.stringify(validated.data.tags),
+      raw,
+      new Date().toISOString()
+    );
+
+    res.status(200).json({
+      id: result.lastInsertRowid,
+      filename: req.file.filename,
+      tags: validated.data.tags
+    });
+  } catch (err) {
+    console.error('tag error:', err);
+    const isTimeout = err.code === 'ETIMEDOUT' || err.name === 'AbortError';
+    return res.status(isTimeout ? 504 : 500).json({
+      error: isTimeout ? 'Model timed out' : 'Tagging failed',
+      detail: err.message
+    });
+  }
 });
 
 // Multer error handler
@@ -69,4 +114,4 @@ app.use((err, req, res, next) => {
 
 app.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT}`);
-});
+}); 
