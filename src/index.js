@@ -101,6 +101,63 @@ app.post('/tag', upload.single('image'), async (req, res) => {
   }
 });
 
+// ─────────────────────────────────────────
+// GET /images — list all, optionally filter by tag
+// ─────────────────────────────────────────
+app.get('/images', (req, res) => {
+  const { tag } = req.query;
+
+  let rows;
+  if (tag) {
+    rows = db.prepare(`
+      SELECT * FROM images
+      WHERE tags LIKE ?
+      ORDER BY id DESC
+    `).all(`%"${tag}"%`);
+  } else {
+    rows = db.prepare('SELECT * FROM images ORDER BY id DESC').all();
+  }
+
+  const result = rows.map(r => ({
+    id: r.id,
+    filename: r.filename,
+    tags: JSON.parse(r.tags),
+    created_at: r.created_at
+  }));
+
+  res.json(result);
+});
+
+// ─────────────────────────────────────────
+// GET /images/:id — single image
+// ─────────────────────────────────────────
+app.get('/images/:id', (req, res) => {
+  const row = db.prepare('SELECT * FROM images WHERE id = ?').get(req.params.id);
+  if (!row) return res.status(404).json({ error: 'Image not found' });
+
+  res.json({
+    id: row.id,
+    filename: row.filename,
+    tags: JSON.parse(row.tags),
+    created_at: row.created_at
+  });
+});
+
+// ─────────────────────────────────────────
+// GET /tags — all unique tags + counts
+// ─────────────────────────────────────────
+app.get('/tags', (req, res) => {
+  const rows = db.prepare('SELECT tags FROM images').all();
+  const counts = {};
+  for (const r of rows) {
+    for (const t of JSON.parse(r.tags)) {
+      counts[t] = (counts[t] || 0) + 1;
+    }
+  }
+  const sorted = Object.entries(counts).sort((a, b) => b[1] - a[1]);
+  res.json(sorted.map(([tag, count]) => ({ tag, count })));
+});
+
 // Multer error handler
 app.use((err, req, res, next) => {
   if (err instanceof multer.MulterError) {
