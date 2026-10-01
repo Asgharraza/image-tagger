@@ -4,3 +4,6 @@ uploads/
 *.db
 *.log
 test.jpg
+uploads/
+*.db
+test.jpg
